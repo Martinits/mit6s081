@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -47,12 +49,61 @@ kvminit()
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+/*
+ * create a kernel pagetable (same as the global) for user process.
+ */
+pagetable_t
+kvminit_user(struct proc *p)
+{
+  pagetable_t user_pgt = (pagetable_t) kalloc();
+  memset(user_pgt, 0, PGSIZE);
+
+  // uart registers
+  kvmmap_user(user_pgt, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  kvmmap_user(user_pgt, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  kvmmap_user(user_pgt, CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  kvmmap_user(user_pgt, PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  kvmmap_user(user_pgt, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  kvmmap_user(user_pgt, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  kvmmap_user(user_pgt, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  // map kernel stack of the process
+  // printf("%p\n", p->kstack);
+  uint64 kstack_pa = walkaddr_kpgt(kernel_pagetable, p->kstack);
+  if(kstack_pa == 0)
+    panic("kvmmap_user");
+  
+  kvmmap_user(user_pgt, p->kstack, kstack_pa, PGSIZE, PTE_R | PTE_W | PTE_X);
+
+  return user_pgt;
+}
+
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void
 kvminithart()
 {
   w_satp(MAKE_SATP(kernel_pagetable));
+  sfence_vma();
+}
+
+void
+kvminithart_user(pagetable_t pgt)
+{
+  w_satp(MAKE_SATP(pgt));
   sfence_vma();
 }
 
@@ -111,6 +162,27 @@ walkaddr(pagetable_t pagetable, uint64 va)
   return pa;
 }
 
+// Look up a virtual address, return the physical address,
+// or 0 if not mapped.
+// Can be used to look up both user pages and kernel pages.
+uint64
+walkaddr_kpgt(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+
+  if(va >= MAXVA)
+    return 0;
+
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return 0;
+  if((*pte & PTE_V) == 0)
+    return 0;
+  pa = PTE2PA(*pte);
+  return pa;
+}
+
 // add a mapping to the kernel page table.
 // only used when booting.
 // does not flush TLB or enable paging.
@@ -119,6 +191,13 @@ kvmmap(uint64 va, uint64 pa, uint64 sz, int perm)
 {
   if(mappages(kernel_pagetable, va, sz, pa, perm) != 0)
     panic("kvmmap");
+}
+
+void
+kvmmap_user(pagetable_t kpgt, uint64 va, uint64 pa, uint64 sz, int perm)
+{
+  if(mappages(kpgt, va, sz, pa, perm) != 0)
+    panic("kvmmap_user");
 }
 
 // translate a kernel virtual address to
@@ -287,6 +366,24 @@ freewalk(pagetable_t pagetable)
     }
   }
   kfree((void*)pagetable);
+}
+
+// Recursively free page-table pages of user process's kernel pagetable
+// WITHOUT freeing leaf physical pages
+void
+freewalk_user(pagetable_t kpgt)
+{
+  // there are 2^9 = 512 PTEs in a page table.
+  for(int i = 0; i < 512; i++){
+    pte_t pte = kpgt[i];
+    if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      freewalk_user((pagetable_t)child);
+      kpgt[i] = 0;
+    }
+  }
+  kfree((void*)kpgt);
 }
 
 // Free user memory pages,

@@ -121,6 +121,14 @@ found:
     return 0;
   }
 
+  // A copy of kernel pagetable
+  p->kernel_pagetable = kern_pagetable(p);
+  if(p->kernel_pagetable == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -150,6 +158,9 @@ freeproc(struct proc *p)
   p->killed = 0;
   p->xstate = 0;
   p->state = UNUSED;
+  if(p->kernel_pagetable)
+    proc_freekernelpagetable(p->kernel_pagetable);
+  p->kernel_pagetable = 0;
 }
 
 // Create a user page table for a given process,
@@ -185,6 +196,11 @@ proc_pagetable(struct proc *p)
   return pagetable;
 }
 
+pagetable_t
+kern_pagetable(struct proc *p){
+  return kvminit_user(p);
+}
+
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
@@ -193,6 +209,14 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
+}
+
+// Free a process's kernel page table, and DO NOT free the
+// physical memory (whcih contains kernel text and data) it refers to.
+void
+proc_freekernelpagetable(pagetable_t kpgt)
+{
+  freewalk_user(kpgt);
 }
 
 // a user program that calls exec("/init")
@@ -473,7 +497,9 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        kvminithart_user(p->kernel_pagetable);
         swtch(&c->context, &p->context);
+        kvminithart();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
