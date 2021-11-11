@@ -122,7 +122,7 @@ found:
   }
 
   // A copy of kernel pagetable
-  p->kernel_pagetable = kern_pagetable(p);
+  p->kernel_pagetable = proc_kpagetable(p);
   if(p->kernel_pagetable == 0){
     freeproc(p);
     release(&p->lock);
@@ -197,7 +197,7 @@ proc_pagetable(struct proc *p)
 }
 
 pagetable_t
-kern_pagetable(struct proc *p){
+proc_kpagetable(struct proc *p){
   return kvminit_user(p);
 }
 
@@ -244,6 +244,9 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+  if(ukvmcopy(p->pagetable, p->kernel_pagetable, 0, p->sz) < 0){
+    panic("userinit: ukvmcopy fail");
+  }
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -262,16 +265,20 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint sz;
+  uint oldsz, sz;
   struct proc *p = myproc();
 
-  sz = p->sz;
+  sz = oldsz = p->sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n)) == 0) {
       return -1;
     }
+    if(ukvmcopy(p->pagetable, p->kernel_pagetable, oldsz, oldsz+n) < 0) {
+      return -1;
+    }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
+    ukvmdealloc(p->kernel_pagetable, oldsz, oldsz+n);
   }
   p->sz = sz;
   return 0;
@@ -297,6 +304,14 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
+  // add user pgt to user's kernel pgt
+  if(ukvmcopy(np->pagetable, np->kernel_pagetable, 0, p->sz) < 0){
+    freeproc(np);
+    release(&np->lock);
+    return -1;
+  }
+
   np->sz = p->sz;
 
   np->parent = p;
