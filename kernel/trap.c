@@ -67,10 +67,36 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 12){
+    // instruction page fault, kill it!
+    printf("page fault: instruction page fault\n");
+    goto kill_process;
+  }else if(r_scause() == 13 || r_scause() == 15){
+    uint64 pgf_va = r_stval();
+    if(pgf_va >= p->sz){
+      printf("page fault: access unallocated address\n");
+      goto kill_process;
+    }
+    if(pgf_va < PGROUNDUP(p->trapframe->sp)){
+      printf("page fault: access address below user stack\n");
+      goto kill_process;
+    }
+    // printf("page fault %p\n", pgf_va);
+    uint64 newpage = (uint64)kalloc();
+    if(newpage == 0){
+      printf("page fault: OOM\n");
+      goto kill_process;
+    }
+    memset((void*)newpage, 0, PGSIZE);
+    if(mappages(p->pagetable, PGROUNDDOWN(pgf_va), PGSIZE, (uint64)newpage, PTE_W|PTE_R|PTE_U) != 0){
+      kfree((void*)newpage);
+      printf("page fault: cannot map page (maybe OOM)\n");
+      goto kill_process;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
+    goto kill_process;
   }
 
   if(p->killed)
@@ -81,6 +107,10 @@ usertrap(void)
     yield();
 
   usertrapret();
+  
+kill_process:
+  p->killed = 1;
+  exit(-1);
 }
 
 //

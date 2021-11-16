@@ -67,7 +67,33 @@ argint(int n, int *ip)
 int
 argaddr(int n, uint64 *ip)
 {
-  *ip = argraw(n);
+  uint64 addr = argraw(n);
+  
+  struct proc *p = myproc();
+  if(walkaddr(p->pagetable, addr) == 0){
+    if(addr >= p->sz){
+      printf("argaddr: unallocated address\n");
+      return -1;
+    }
+    if(addr < PGROUNDUP(p->trapframe->sp)){
+      backtrace();
+      printf("argaddr: address below user stack %p %p\n", addr, PGROUNDUP(p->trapframe->sp));
+      return -1;
+    }
+    uint64 newpage = (uint64)kalloc();
+    if(newpage == 0){
+      printf("argaddr: OOM\n");
+      return -1;
+    }
+    memset((void*)newpage, 0, PGSIZE);
+    if(mappages(p->pagetable, PGROUNDDOWN(addr), PGSIZE, (uint64)newpage, PTE_W|PTE_R|PTE_U) != 0){
+      kfree((void*)newpage);
+      printf("argaddr: cannot map page (maybe OOM)\n");
+      return -1;
+    }
+  }
+  
+  *ip = addr;
   return 0;
 }
 
