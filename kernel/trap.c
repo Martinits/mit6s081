@@ -77,8 +77,12 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2){
+    //check alarm
+    alarm_check();
+    
     yield();
+  }
 
   usertrapret();
 }

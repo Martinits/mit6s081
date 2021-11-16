@@ -96,3 +96,39 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sigalarm(void)
+{
+  int ticks;
+  uint64 handler;
+  
+  if(argint(0, &ticks) < 0)
+    return -1;
+  if(ticks < 0)
+    return -1;
+  if(argaddr(1, &handler) < 0)
+    return -1;
+  
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  p->alarm_ticks_left = p->alarm_ticks = ticks;
+  p->alarm_handler = handler;
+  release(&p->lock);
+  return 0;
+}
+
+uint64
+sys_sigreturn(void)
+{
+  struct proc *p = myproc();
+  acquire(&p->lock);
+  // if(p->alarm_ticks == 0)
+  //   panic("sigreturn: process alarm not registered");
+  if(p->alarm_ticks > 0 && p->alarm_ticks_left > 0)
+    panic("sigreturn: process not in alarm");
+  memmove(p->trapframe, p->alarm_trapframe, sizeof(struct trapframe));
+  p->alarm_ticks_left = p->alarm_ticks;
+  release(&p->lock);
+  return 0;
+}
