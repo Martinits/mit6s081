@@ -23,9 +23,17 @@ struct {
   struct run *freelist;
 } kmem;
 
+#define PHYPGNUM ((PGROUNDDOWN(PHYSTOP)-PGROUNDUP(KERNBASE))/PGSIZE)
+#define PA2IDX(pa) ((PGROUNDDOWN((pa))-PGROUNDUP(KERNBASE))/PGSIZE)
+
+struct spinlock reflock;
+uchar refcnt[PHYPGNUM]={0};
+
 void
 kinit()
 {
+  memset(refcnt, 0, sizeof(refcnt));
+  initlock(&reflock, "ref");
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
@@ -50,6 +58,17 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+  
+  int idx = PA2IDX((uint64)pa);
+  acquire(&reflock);
+  if(refcnt[idx] > 0){
+    refcnt[idx]--;
+    if(refcnt[idx] != 0){
+      release(&reflock);
+      return;
+    }
+  }
+  release(&reflock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -72,11 +91,51 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  if(r){
     kmem.freelist = r->next;
+    acquire(&reflock);
+    refcnt[PA2IDX((uint64)r)] = 1;
+    release(&reflock);
+  }
   release(&kmem.lock);
 
-  if(r)
+  if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
+  }
   return (void*)r;
+}
+
+int
+kref(uint64 pa){
+  if(pa >= PHYSTOP){
+    printf("kref: address over PHYSTOP");
+    return -1;
+  }
+  if(pa < KERNBASE){
+    printf("kref: address below KERNBASE");
+    return -1;
+  }
+  uint64 idx = PA2IDX(pa);
+  acquire(&reflock);
+  refcnt[idx]++;
+  release(&reflock);
+  if(refcnt[idx]==0){
+    panic("kref: max references");
+    return -1;
+  }
+  return 0;
+}
+
+int
+kgetref(uint64 pa){
+  if(pa >= PHYSTOP){
+    printf("kgetref: address over PHYSTOP");
+    return -1;
+  }
+  if(pa < KERNBASE){
+    printf("kgetref: address below KERNBASE");
+    return -1;
+  }
+  uint64 idx = PA2IDX(pa);
+  return (int)(refcnt[idx]);
 }

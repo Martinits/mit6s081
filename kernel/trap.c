@@ -50,7 +50,9 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  uint64 scause = r_scause();
+  
+  if(scause == 8){
     // system call
 
     if(p->killed)
@@ -67,11 +69,24 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
-  }
+  } else if(scause == SCAUSE_PGF_ST){
+    uint64 pgf_va = r_stval();
+    if(pgf_va >= p->sz){
+      printf("page fault: write unallocated address\n");
+      goto kill_process;
+    }
+    // printf("page fault %p\n", pgf_va);
+    pte_t *pte = walk(p->pagetable, pgf_va, 0);
+    if((*pte & PTE_V) == 0){
+      panic("page fault: not mapped");
+      goto kill_process;
+    }
+    if((*pte & PTE_COW) == 0)
+      goto unexpected;
+    if(cow_alloc(pte) == 0)
+      goto kill_process;
+    
+  } else goto unexpected;
 
   if(p->killed)
     exit(-1);
@@ -81,6 +96,13 @@ usertrap(void)
     yield();
 
   usertrapret();
+
+unexpected:
+  printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+  printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+kill_process:
+  p->killed = 1;
+  exit(-1);
 }
 
 //

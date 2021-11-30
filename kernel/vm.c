@@ -311,7 +311,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -320,12 +319,23 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
+    if(flags & PTE_W){
+      flags &= ~PTE_W;
+      flags |= PTE_COW;
+    }
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
-      goto err;
+    kref(pa);
+  }
+  
+  for(i = 0; i < sz; i += PGSIZE){
+    if((pte = walk(old, i, 0)) == 0)
+      panic("uvmcopy: pte should exist");
+    if((*pte & PTE_V) == 0)
+      panic("uvmcopy: page not present");
+    if(*pte & PTE_W){
+      *pte &= ~PTE_W;
+      *pte |= PTE_COW;
     }
   }
   return 0;
@@ -355,10 +365,20 @@ int
 copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
+  pte_t *pte;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
-    pa0 = walkaddr(pagetable, va0);
+    if(va0 >= MAXVA)
+      return -1;
+    pte = walk(pagetable, va0, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      return -1;
+    if(*pte & PTE_COW){
+      pa0 = cow_alloc(pte);
+    }else{
+      pa0 = PTE2PA(*pte);
+    }
     if(pa0 == 0)
       return -1;
     n = PGSIZE - (dstva - va0);
@@ -439,4 +459,35 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+uint64
+cow_alloc(pte_t *pte){
+  if(*pte & PTE_W){
+    panic("cow_alloc: writable cow page");
+    return 0;
+  }
+  
+  uint64 pa = PTE2PA(*pte);
+  uint64 flags = PTE_FLAGS(*pte);
+  flags &= ~PTE_COW;
+  flags |= PTE_W;
+  int paref = kgetref(pa);
+  if(paref < 0){
+    panic("cow_alloc: cannot get refcnt");
+  }else if(paref == 0){
+    panic("cow_alloc: 0 refcnt of a using page");
+  }
+  uint64 newpage = pa;
+  if(paref > 1){
+    newpage = (uint64)kalloc();
+    if(newpage == 0){
+      // printf("cow_alloc: OOM\n");
+      return 0;
+    }
+    memmove((void*)newpage, (const void *)pa, PGSIZE);
+    kfree((void*)pa);
+  }
+  *pte = PA2PTE(newpage) | flags;
+  return newpage;
 }
