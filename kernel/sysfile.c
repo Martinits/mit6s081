@@ -484,3 +484,103 @@ sys_pipe(void)
   }
   return 0;
 }
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  if(argaddr(0, &addr)   < 0 ||
+      argint(1, &length) < 0 ||
+      argint(2, &prot)   < 0 ||
+      argint(3, &flags)  < 0 ||
+      argfd(4, &fd, &f)  < 0 ||
+      argint(5, &offset) < 0
+      )
+    return -1;
+
+  if(addr != 0 || length <= 0 || offset != 0) return -1;
+
+  if(prot != PROT_READ &&
+      prot != PROT_WRITE &&
+      prot != (PROT_READ | PROT_WRITE))
+    return -1;
+
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+
+  if(!f->writable && (prot & PROT_WRITE) && (flags & MAP_SHARED))
+    return -1;
+
+  if(!f->readable && (prot & PROT_READ))
+    return -1;
+
+  struct vmarea *pvma = 0;
+  for(int i = 0; i < MAXVMA; i++){
+    if(p->vma[i].used == 0){
+      pvma = &p->vma[i];
+      break;
+    }
+  }
+
+  if(pvma == 0) return -1;
+
+  pvma->used = 1;
+  pvma->addr = p->sz;
+  pvma->prot = prot;
+  pvma->len = length;
+  pvma->flags = flags;
+  pvma->offset = 0;
+  pvma->f = f;
+  filedup(f);
+  p->sz+=length;
+  return pvma->addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+  
+  if(length < 0) return -1;
+
+  struct proc *p= myproc();
+  struct vmarea *pvma = 0;
+  for(int i = 0; i < MAXVMA; i++){
+    if(p->vma[i].used){
+      if(p->vma[i].addr == addr){
+        pvma = &p->vma[i];
+        pvma->addr += length;
+        pvma->len -= length;
+        break;
+      } else if (p->vma[i].addr + p->vma[i].len == addr + length){
+        pvma = &p->vma[i];
+        pvma->len -= length;
+        break;
+      }
+    }
+  }
+
+  if(pvma == 0) return -1;
+
+  if(pvma->flags == MAP_SHARED && (pvma->prot & PROT_WRITE)){
+    filewrite(pvma->f, addr, length);
+  }
+
+  uint64 npages = (addr + length - PGROUNDUP(addr)) / PGSIZE;
+  uvmunmap(p->pagetable, PGROUNDUP(addr), npages, 1);
+
+  if(pvma->len == 0){
+    fileclose(pvma->f);
+    pvma->used = 0;
+  }
+
+  return 0;
+}

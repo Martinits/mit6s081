@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -133,6 +134,8 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+
+  memset(&p->vma, 0, sizeof(p->vma));
 
   return p;
 }
@@ -296,6 +299,13 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  for(int i = 0; i < MAXVMA; i++){
+    if(p->vma[i].used){
+      np->vma[i] = p->vma[i];
+      filedup(np->vma[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -343,6 +353,19 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  for(int i = 0; i < MAXVMA; i++){
+    if(p->vma[i].used){
+      if(p->vma[i].flags == MAP_SHARED && (p->vma[i].prot & PROT_WRITE)){
+        filewrite(p->vma[i].f, p->vma[i].addr, p->vma[i].len);
+      }
+      fileclose(p->vma[i].f);
+
+      uint64 npages = (p->vma[i].addr + p->vma[i].len - PGROUNDUP(p->vma[i].addr)) / PGSIZE;
+      uvmunmap(p->pagetable, PGROUNDUP(p->vma[i].addr), npages, 1);
+      p->vma[i].used = 0;
+    }
+  }
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){

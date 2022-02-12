@@ -67,6 +67,18 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    uint64 pgf_va = r_stval();
+    if(pgf_va >= p->sz){
+      printf("page fault: access unallocated address\n");
+      goto kill_process;
+    }
+    if(pgf_va < PGROUNDUP(p->trapframe->sp)){
+      printf("page fault: access address below user stack\n");
+      goto kill_process;
+    }
+    if(mmap_handler(pgf_va, (r_scause()==13?0:1)) != 0)
+      goto kill_process;
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
@@ -81,6 +93,10 @@ usertrap(void)
     yield();
 
   usertrapret();
+
+kill_process:
+  p->killed = 1;
+  exit(-1);
 }
 
 //

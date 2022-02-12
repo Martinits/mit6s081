@@ -5,6 +5,11 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "fcntl.h"
+#include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -172,7 +177,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     if((pte = walk(pagetable, a, 0)) == 0)
       panic("uvmunmap: walk");
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -306,7 +311,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((pte = walk(old, i, 0)) == 0)
       panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -428,4 +433,54 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   } else {
     return -1;
   }
+}
+
+int
+mmap_handler(uint64 va, int write)
+{
+  struct proc *p = myproc();
+  struct vmarea *pvma = 0;
+
+  for(int i = 0; i < MAXVMA; i++){
+    if(p->vma[i].used){
+      if(p->vma[i].addr <= va && va < p->vma[i].addr + p->vma[i].len){
+        pvma = &p->vma[i];
+        break;
+      }
+    }
+  }
+
+  if(pvma == 0) return -1;
+
+  if(write == 0 && !(pvma->prot & PROT_READ)) return -1;
+  if(write == 0 && !pvma->f->readable) return -1;
+  if(write && !(pvma->prot & PROT_WRITE)) return -1;
+  if(write && !pvma->f->writable) return -1;
+
+  uint64 pa = (uint64)kalloc();
+  if(pa == 0) return -1;
+  memset((void*)pa, 0, PGSIZE);
+
+  ilock(pvma->f->ip);
+
+  int off = pvma->offset + PGROUNDDOWN(va) - pvma->addr;
+  int readbytes = readi(pvma->f->ip, 0, pa, off, PGSIZE);
+  if(readbytes <= 0 || readbytes > PGSIZE){
+    iunlock(pvma->f->ip);
+    kfree((void*)pa);
+    return -1;
+  }
+
+  iunlock(pvma->f->ip);
+
+  int pte_flags = PTE_U;
+  if(pvma->prot & PROT_READ) pte_flags |= PTE_R;
+  if(pvma->prot & PROT_WRITE) pte_flags |= PTE_W;
+
+  if(mappages(p->pagetable, va, PGSIZE, pa, pte_flags) != 0){
+    kfree((void*)pa);
+    return -1;
+  }
+
+  return 0;
 }
